@@ -146,4 +146,19 @@ class AuthController extends Controller
             'userToken' => $token,
         ], 201);
     }
+
+    /**
+     * API 3: 登出 (撤銷當前 Token)
+     * 路由: POST /api/auth/logout
+     */
+    public function logout(Request $request)
+    {
+        // 確保用戶已認證，並刪除當前使用的 Token
+        $request->user()->currentAccessToken()->delete();
+
+        return response()->json([
+            'message' => 'Successfully logged out.'
+        ], 200);
+    }
+    
 }

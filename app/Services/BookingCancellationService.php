@@ -6,9 +6,14 @@ use App\Models\Course;
 use App\Models\Booking;
 use App\Models\MembershipCard;
 use App\Models\PointLog; // 確保 PointLog 存在
+
+use App\Services\BookingCancellationService;
+
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Support\Carbon;
+
+use Illuminate\Http\Request;
 
 class BookingCancellationService
 {

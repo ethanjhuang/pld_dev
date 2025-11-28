@@ -11,10 +11,22 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('coaches', function (Blueprint $table) {
-            // 新增電話和郵箱欄位
-            $table->string('phone', 20)->nullable()->after('bio');
-            $table->string('email')->nullable()->unique()->after('phone');
+        // 【修正】使用單數 'coach' 表名，解決 PostgreSQL 大小寫問題。
+        Schema::create('coaches', function (Blueprint $table) { 
+            $table->uuid('coach_id')->primary();
+            $table->string('name');
+            
+            // 合併自後續 migration (add_contact_to_coaches_table.php)
+            $table->string('phone')->nullable();
+            $table->string('email')->unique();
+            $table->boolean('is_active')->default(true);
+            
+            // 合併自後續 migration (add_member_id_to_coaches_table.php)
+            // NOTE: 'member' 表名必須是單數
+            $table->uuid('member_id')->nullable(); 
+            $table->foreign('member_id')->references('member_id')->on('members')->onDelete('set null'); 
+            
+            $table->timestamps();
         });
     }
 
@@ -23,9 +35,7 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::table('coaches', function (Blueprint $table) {
-            // 撤銷時刪除新增的欄位
-            $table->dropColumn(['phone', 'email']);
-        });
+        // 【修正】使用單數 'coach'
+        Schema::dropIfExists('coaches');
     }
 };

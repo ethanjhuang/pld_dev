@@ -63,15 +63,15 @@ class AdminPointController extends Controller
                     
                     // 1. 檢查點數總和是否足夠
                     if (($card->remaining_points + $card->locked_points) < $amount) {
-                         throw new \Exception("Cannot deduct {$amount}. Available points (remaining + locked) are insufficient.");
+                            throw new \Exception("Cannot deduct {$amount}. Available points (remaining + locked) are insufficient.");
                     }
                     
                     // 2. 執行扣除
                     if ($neededFromLocked > 0) {
-                         // 複雜扣除：remaining_points 歸零，從 locked_points 扣除餘額
-                         $card->remaining_points = 0;
-                         $card->locked_points -= $neededFromLocked;
-                         $deductedFromLocked = $neededFromLocked; // 標記：locked_points 被觸及
+                            // 複雜扣除：remaining_points 歸零，從 locked_points 扣除餘額
+                            $card->remaining_points = 0;
+                            $card->locked_points -= $neededFromLocked;
+                            $deductedFromLocked = $neededFromLocked; // 標記：locked_points 被觸及
                     } else {
                         // 簡單扣除：只從 remaining_points 扣除
                         $card->remaining_points -= $amount;
@@ -151,7 +151,8 @@ class AdminPointController extends Controller
                 'BOOKING_CONFIRMED', 'BOOKING_LOCKED', 'CANCELLATION_REFUND', 
                 'UNLOCKED_CANCELLATION', 'WAITLIST_CONFIRMED', 'LOCKED_TIMEOUT_RELEASE',
                 'ADMIN_ADJUST_ADD', 'ADMIN_ADJUST_DEDUCT', 'ADMIN_WAITLIST_CLEANUP',
-                'FINALIZED_REFUND', 'NO_SHOW', 'UNLOCKED_FINALIZED', 'ADMIN_CARD_ADJUST' // A5.3 新增 Log Type
+                'FINALIZED_REFUND', 'NO_SHOW', 'UNLOCKED_FINALIZED', 'ADMIN_CARD_ADJUST', // A5.3 新增 Log Type
+                'TRANSFER_COMPLETED_CONSUMED', 'TRANSFER_RECEIVED', 'TRANSFER_LOCKED', 'TRANSFER_CANCELLED_REFUND' // 轉讓 Log Type
             ])],
             'startDate' => 'nullable|date',
             'endDate' => 'nullable|date',
@@ -191,14 +192,13 @@ class AdminPointController extends Controller
             'currentPage' => $pointLogs->currentPage(),
             'lastPage' => $pointLogs->lastPage(),
             'total' => $pointLogs->total(),
-            // 由於 PointLog 關聯到 MembershipCard，我們可以在這裡加入會員名稱或 ID 方便 Admin 查看
             'pointLogs' => $pointLogs->items(), 
         ]);
     }
 
     /**
      * Admin API A5.3: 會員卡屬性管理 (創建/更新效期/強制財務修正)
-     * 專注於卡片元數據的創建和修正，不處理點數累加。
+     * 專注於卡片元數據的創建和修正。
      */
     public function manageCard(Request $request)
     {
@@ -212,39 +212,42 @@ class AdminPointController extends Controller
             'totalPoints' => 'nullable|numeric|min:0', // 用於創建時初始化，更新時用於修正 totalPoints
             'expiryDate' => 'nullable|date_format:Y-m-d', // 用於設置或延長效期
             'purchaseAmount' => 'nullable|numeric|min:0', // 用於創建時初始化或強制修正 total purchase amount
+            'cardStatus' => ['nullable', 'string', Rule::in(['ACTIVE', 'EXPIRED', 'SUSPENDED'])], // 【新增】修正狀態
         ]);
 
         $memberId = $validated['memberId'];
         $totalPoints = $validated['totalPoints'] ?? null;
         $expiryDate = $validated['expiryDate'] ?? null;
-        $purchaseAmount = $validated['purchaseAmount'] ?? null; // 讓其為 null，在創建時給予 0.00
+        $purchaseAmount = $validated['purchaseAmount'] ?? null;
+        $cardStatus = $validated['cardStatus'] ?? null; // 獲取卡片狀態
         $adminId = auth()->user()->member_id;
         $action = '';
-        $card = null; // 初始化 $card
+        $card = null; 
 
         try {
-            DB::transaction(function () use ($memberId, $totalPoints, $expiryDate, $purchaseAmount, $adminId, &$action, &$card, $request) {
+            DB::transaction(function () use ($memberId, $totalPoints, $expiryDate, $purchaseAmount, $cardStatus, $adminId, &$action, &$card, $request) {
                 
                 // 1. 鎖定會員卡
                 $card = MembershipCard::where('member_id', $memberId)->lockForUpdate()->first();
                 $notes = [];
                 
                 if (!$card) {
-                    // --- CREATE 邏輯 (初始化卡片) ---
+                    // --- A5.3.1: CREATE 邏輯 (初始化卡片) ---
                     $card = MembershipCard::create([
                         'card_id' => Str::uuid(),
                         'member_id' => $memberId,
                         'total_points' => $totalPoints ?? 0,
                         'remaining_points' => $totalPoints ?? 0, 
                         'locked_points' => 0,
-                        'purchase_amount' => $purchaseAmount ?? 0.00, // 首次創建，無購買金額則為 0
-                        'card_status' => 'ACTIVE',
+                        'purchase_amount' => $purchaseAmount ?? 0.00,
+                        'status' => $cardStatus ?? 'ACTIVE', // 使用 status 欄位 (假設 MembershipCard Model 已修正)
                         'expiry_date' => $expiryDate ? Carbon::parse($expiryDate) : null,
+                        'type' => 'POINTS', // 必須提供 NOT NULL 欄位的值
                     ]);
                     $action = 'CREATED';
-                    $notes[] = "Card created with total points: {$card->total_points} and purchase amount: {$card->purchase_amount}.";
+                    $notes[] = "Card created with total points: {$card->total_points}, purchase amount: {$card->purchase_amount}, status: {$card->status}.";
                 } else {
-                    // --- UPDATE 邏輯 (屬性修正) ---
+                    // --- A5.3.2: UPDATE 邏輯 (屬性修正) ---
                     
                     // 1. 修正 totalPoints (只允許修正，點數累加由 adjustCardTotalPoints 處理)
                     if ($totalPoints !== null && $totalPoints != $card->total_points) {
@@ -279,11 +282,16 @@ class AdminPointController extends Controller
                         $notes[] = "Expiry date updated to {$expiryDate}.";
                     }
                     
-                    // 3. 強制修正 purchaseAmount (範例三)
+                    // 3. 修正 Card Status (狀態修正)
+                    if ($cardStatus && $cardStatus != $card->status) {
+                        $card->status = $cardStatus;
+                        $notes[] = "Card status manually changed to {$cardStatus}.";
+                    }
+                    
+                    // 4. 強制修正 purchaseAmount (範例三)
                     if ($request->has('purchaseAmount') && $purchaseAmount !== null) {
-                         // 這裡假設 Admin 是要設置或修正購買金額的總值，所以直接覆蓋。
-                         $card->purchase_amount = $purchaseAmount;
-                         $notes[] = "Purchase amount explicitly set/corrected to {$purchaseAmount}.";
+                        $card->purchase_amount = $purchaseAmount;
+                        $notes[] = "Purchase amount explicitly set/corrected to {$purchaseAmount}.";
                     }
                     
                     $card->save();
@@ -291,7 +299,7 @@ class AdminPointController extends Controller
                 }
 
                 if (empty($notes)) {
-                     $notes[] = "No effective changes applied.";
+                    $notes[] = "No effective changes applied.";
                 }
 
                 Log::info("Admin {$adminId} managed membership card for member {$memberId}: {$action}. Notes: " . implode('; ', $notes));

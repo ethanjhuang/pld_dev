@@ -14,7 +14,7 @@ class CourseController extends Controller
      * API 6/12: 課程列表查詢 (會員介面)
      * 查詢指定日期區間、特定條件下，用戶可預約的課程。
      */
-    public function listCourses(Request $request)
+    public function index(Request $request)
     {
         // 1. 數據驗證
         $validated = $request->validate([
@@ -91,6 +91,45 @@ class CourseController extends Controller
                 ];
             })
         ], 200);
+    }
+    
+    /**
+     * API 16: 查詢單一課程詳情 (Public)
+     * 路由: GET /api/course/{courseId}
+     * 【補齊】實作 show 方法
+     */
+    public function show(string $courseId)
+    {
+        $course = Course::with(['coach', 'classroom', 'series'])
+            ->findOrFail($courseId);
+
+        return response()->json($course);
+    }
+
+    /**
+     * API 17: 教練查詢自己負責的課程列表
+     * 路由: GET /api/coach/courses
+     * 【補齊】實作 getCoachCourses 方法
+     */
+    public function getCoachCourses(Request $request)
+    {
+        // 權限檢查已在路由中間件中處理 (can:is-coach)
+        $authenticatedUser = auth()->user();
+        
+        // 1. 確保 Member 帳號有關聯的 Coach Profile
+        $coach = $authenticatedUser->coach;
+
+        if (!$coach) {
+            return response()->json(['message' => 'Forbidden: Coach profile not linked or not found.'], 403);
+        }
+
+        // 2. 查詢該教練 ID 負責的所有課程，並預載入相關資料
+        $courses = Course::where('coach_id', $coach->coach_id)
+                         ->with(['classroom']) 
+                         ->orderBy('start_time', 'asc')
+                         ->get();
+
+        return response()->json($courses);
     }
     
     /**

@@ -18,10 +18,16 @@ use Illuminate\Support\Facades\Log;
 
 class BookingController extends Controller
 {
+    protected $cancellationService;
+
+    public function __construct(BookingCancellationService $cancellationService)
+    {
+        $this->cancellationService = $cancellationService;
+    }
+
     // API 7: 處理預約、批次預約、後補、點數鎖定 (包含覆蓋邏輯)
     public function createBooking(Request $request)
     {
-        // ... (createBooking 邏輯保持不變，因為邏輯已修正)
         $userId = auth()->user()->member_id;
 
         $validated = $request->validate([
@@ -292,5 +298,33 @@ class BookingController extends Controller
             ->get();
 
         return $conflictingBookings->pluck('booking_id')->toArray();
+    }
+
+    /**
+     * API 9: 查詢會員預約歷史紀錄
+     * 路由: GET /api/booking/history
+     */
+    public function getBookingHistory(Request $request)
+    {
+        $memberId = $request->user()->member_id;
+        $perPage = $request->get('perPage', 10);
+        $status = $request->get('status'); // 可篩選 CONFIRMED, CANCELLED, ATTENDED, NO_SHOW 等
+
+        $query = Booking::where('member_id', $memberId)
+            // 預加載課程詳情，避免 N+1 問題
+            ->with(['course.coach', 'course.classroom']) 
+            ->orderBy('created_at', 'desc');
+
+        if ($status) {
+            // 確保狀態篩選是有效的
+            $validStatuses = ['CONFIRMED', 'CANCELLED', 'ATTENDED', 'NO_SHOW', 'WAITING'];
+            if (in_array(strtoupper($status), $validStatuses)) {
+                $query->where('status', strtoupper($status));
+            }
+        }
+        
+        $bookings = $query->paginate($perPage);
+
+        return response()->json($bookings);
     }
 }

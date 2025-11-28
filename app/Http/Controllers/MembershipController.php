@@ -15,6 +15,26 @@ use Illuminate\Support\Carbon;
 class MembershipController extends Controller
 {
     /**
+     * API 10: 查詢會員卡點數餘額
+     */
+    public function getBalance(Request $request)
+    {
+        $member = $request->user();
+        $card = $member->membershipCard;
+
+        if (!$card) {
+            return response()->json(['message' => 'Membership card not found.'], 404);
+        }
+
+        return response()->json([
+            'remainingPoints' => $card->remaining_points,
+            'lockedPoints' => $card->locked_points,
+            'totalPoints' => $card->total_points, 
+            'status' => $card->status, 
+        ]);
+    }
+
+    /**
      * API 11: 查詢會員點數異動紀錄 (PointLog)
      */
     public function getPointLog(Request $request)
@@ -46,6 +66,56 @@ class MembershipController extends Controller
         ], 200);
     }
     
+    // --- 會員資料管理 (API 4 & 5) ---
+    
+    /**
+     * API 4: 查詢會員個人資料 (Get Member Profile)
+     * 路由: GET /api/member/profile
+     */
+    public function getProfile(Request $request)
+    {
+        $member = $request->user();
+        
+        // 排除敏感資訊 (如密碼 Hash)，只返回 Member 模型和 MembershipCard 關聯
+        $profile = $member->only(['member_id', 'line_id', 'name', 'phone', 'email', 'role', 'referral_code', 'created_at']);
+        
+        // 如果 Member 模型有關聯 MembershipCard
+        $cardData = [];
+        if ($member->membershipCard) {
+             $cardData = $member->membershipCard->only(['card_id', 'remaining_points', 'locked_points', 'status']);
+        }
+        
+        return response()->json([
+            'member' => $profile,
+            'card' => $cardData, 
+        ]);
+    }
+
+    /**
+     * API 5: 更新會員個人資料 (Update Member Profile)
+     * 路由: PUT /api/member/profile
+     */
+    public function updateProfile(Request $request)
+    {
+        $member = $request->user();
+        
+        $validated = $request->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'phone' => 'sometimes|required|string|max:20',
+            // 允許 email 欄位，但必須是唯一的，並忽略當前用戶的 email
+            'email' => ['sometimes', 'required', 'email', Rule::unique('members', 'email')->ignore($member->member_id, 'member_id')],
+        ]);
+
+        $member->update($validated);
+
+        return response()->json([
+            'message' => 'Profile updated successfully.',
+            'member' => $member->only(['member_id', 'name', 'phone', 'email']),
+        ]);
+    }
+
+    // --- 【V1.5 核心交易】點數轉讓 ---
+
     /**
      * API 13: 點數轉讓 - 啟動階段 (鎖定點數)
      */
