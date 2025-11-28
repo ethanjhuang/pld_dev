@@ -7,10 +7,12 @@ use App\Models\MembershipCard;
 use App\Models\TransferLog;
 use App\Models\SystemConfig;
 use App\Models\PointLog;
+use App\Models\Transaction; // 【新增】引入 Transaction Model (API 12 需要)
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Support\Carbon;
+use Illuminate\Validation\Rule; // 【補齊】引入 Rule (您原本的 updateProfile 有使用到)
 
 class MembershipController extends Controller
 {
@@ -113,8 +115,126 @@ class MembershipController extends Controller
             'member' => $member->only(['member_id', 'name', 'phone', 'email']),
         ]);
     }
+    
+    // --- 【新增功能】API 12: 點數購買與金流整合 (V1.7 新增) ---
 
-    // --- 【V1.5 核心交易】點數轉讓 ---
+    /**
+     * API 12.1: 發起點數購買 (Initiate Purchase)
+     * 創建 PENDING 交易，返回付款連結。
+     */
+    public function purchasePoints(Request $request)
+    {
+        $memberId = auth()->user()->member_id;
+
+        $validated = $request->validate([
+            'amount' => 'required|numeric|min:1', // 購買金額 (TWD)
+            'points' => 'required|numeric|min:1', // 對應點數
+            'planName' => 'required|string', // 方案名稱
+        ]);
+
+        $amount = $validated['amount'];
+        $points = $validated['points'];
+        $planName = $validated['planName'];
+        
+        $transactionId = Str::uuid();
+
+        try {
+            // 創建 PENDING 交易紀錄
+            $transaction = Transaction::create([
+                'transaction_id' => $transactionId,
+                'member_id' => $memberId,
+                'amount' => $amount,
+                'type' => 'POINT_PURCHASE',
+                'status' => 'PENDING',
+                'description' => "Purchase Plan: {$planName} ({$points} pts)",
+            ]);
+
+            return response()->json([
+                'message' => 'Purchase initiated. Please proceed to payment.',
+                'transactionId' => $transactionId,
+                'amount' => $amount,
+                'redirectUrl' => 'https://mock.payment.gateway/pay?txn=' . $transactionId, // 模擬金流
+            ], 202);
+
+        } catch (\Exception $e) {
+            \Log::error("Point purchase initiation failed: " . $e->getMessage());
+            return response()->json(['message' => 'Purchase failed: ' . $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * API 12.2: 點數購買回調 (Payment Callback)
+     * 接收金流通知，確認交易並入帳點數。
+     */
+    public function paymentCallback(Request $request)
+    {
+        // 模擬金流回調數據
+        $validated = $request->validate([
+            // 假設 Transaction 表名為單數 transaction
+            'transactionId' => 'required|uuid|exists:transaction,transaction_id',
+            'status' => 'required|in:SUCCESS,FAILED',
+        ]);
+
+        $transactionId = $validated['transactionId'];
+        $isSuccess = $validated['status'] === 'SUCCESS';
+
+        try {
+            DB::transaction(function () use ($transactionId, $isSuccess) {
+                
+                // 1. 鎖定交易紀錄
+                $transaction = Transaction::where('transaction_id', $transactionId)->lockForUpdate()->firstOrFail();
+
+                // 防止重複處理 (Idempotency)
+                if ($transaction->status === 'PAID' || $transaction->status === 'FAILED') {
+                    return; 
+                }
+
+                if (!$isSuccess) {
+                    $transaction->status = 'FAILED';
+                    $transaction->save();
+                    return;
+                }
+
+                // 2. 解析方案點數 (從 description 解析)
+                preg_match('/\((\d+) pts\)/', $transaction->description, $matches);
+                $pointsToAdd = isset($matches[1]) ? (float)$matches[1] : 0;
+
+                if ($pointsToAdd <= 0) {
+                    throw new \Exception("Failed to parse points from transaction description.");
+                }
+
+                // 3. 更新交易狀態
+                $transaction->status = 'PAID';
+                $transaction->save();
+
+                // 4. 入帳：更新會員卡 (原子操作)
+                $card = MembershipCard::where('member_id', $transaction->member_id)->lockForUpdate()->firstOrFail();
+                
+                $card->total_points += $pointsToAdd;
+                $card->remaining_points += $pointsToAdd;
+                $card->purchase_amount += $transaction->amount; // 累加總消費金額
+                $card->save();
+
+                // 5. 記錄 PointLog
+                PointLog::create([
+                    'log_id' => Str::uuid(),
+                    'membership_id' => $card->card_id,
+                    'change_amount' => $pointsToAdd,
+                    'change_type' => 'POINT_PURCHASE',
+                    'related_id' => $transaction->transaction_id,
+                    'notes' => 'Online Purchase: ' . $transaction->description,
+                ]);
+            });
+
+            return response()->json(['message' => 'Payment processed successfully.'], 200);
+
+        } catch (\Exception $e) {
+            \Log::error("Payment callback failed: " . $e->getMessage());
+            return response()->json(['message' => 'Callback processing failed: ' . $e->getMessage()], 500);
+        }
+    }
+
+    // --- 【V1.5 核心交易】點數轉讓 (保持原樣) ---
 
     /**
      * API 13: 點數轉讓 - 啟動階段 (鎖定點數)
@@ -245,7 +365,6 @@ class MembershipController extends Controller
             \Log::error("Transfer execution failed: " . $e->getMessage());
             return response()->json(['message' => 'Transfer execution failed: ' . $e->getMessage()], 500);
         }
-
         return response()->json(['message' => 'Points successfully transferred.'], 200);
     }
 
